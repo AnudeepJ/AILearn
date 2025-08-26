@@ -1,7 +1,11 @@
 package com.learn.mobileaipoc
 
 import ai.liquid.leap.message.MessageResponse
+import android.graphics.Typeface
 import android.os.Bundle
+import android.text.Spannable
+import android.text.SpannableStringBuilder
+import android.text.style.StyleSpan
 import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
@@ -18,8 +22,10 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.withContext
+import measureMemoryDeltaTimed
 
 const val TAG = "SummarizeFragment"
+
 class SummarizeFragment : Fragment() {
 
     private var _binding: FragmentSummarizeBinding? = null
@@ -37,10 +43,17 @@ class SummarizeFragment : Fragment() {
         super.onViewCreated(view, savedInstanceState)
         binding.buttonLoadModel.setOnClickListener { loadModel() }
         binding.buttonSummarize.setOnClickListener {
-            binding.progressBar.visibility= View.VISIBLE
-            summarize() }
+
+            binding.progressBar.visibility = View.VISIBLE
+
+            summarize()
+        }
         binding.buttonCancel.setOnClickListener { generationJob?.cancel() }
-        loadModel()
+        lifecycleScope.launch(Dispatchers.IO) {
+            val (model, snapshots) = requireContext().measureMemoryDeltaTimed("ModelLoad") {
+                loadModel() // your model-loading function
+            }
+        }
     }
 
     private fun loadModel() {
@@ -49,11 +62,43 @@ class SummarizeFragment : Fragment() {
                 requireContext(),
                 preferredName = "model.bundle"
             )
-            Log.d(TAG,"" + if (ok) getString(R.string.model_loaded) else getString(R.string.model_load_failed))
+            Log.d(
+                TAG,
+                "" + if (ok) getString(R.string.model_loaded) else getString(R.string.model_load_failed)
+            )
             withContext(Dispatchers.Main) {
-                binding.textStatus.text = if (ok) getString(R.string.model_loaded) else getString(R.string.model_load_failed)
+                binding.textStatus.text =
+                    if (ok) getString(R.string.model_loaded) else getString(R.string.model_load_failed)
             }
         }
+    }
+
+    fun parseMarkdownToSpannable(text: String): SpannableStringBuilder {
+        val regex = Regex("\\*\\*(.*?)\\*\\*") // match **something**
+
+        val spannable = SpannableStringBuilder(text)
+        var offset = 0
+
+        regex.findAll(text).forEach { match ->
+            val start = match.range.first - offset
+            val end = match.range.last + 1 - offset
+            val content = match.groups[1]?.value ?: ""
+
+            // Replace **content** with just content
+            spannable.replace(start, end, content)
+
+            // Apply bold span only to inner content
+            spannable.setSpan(
+                StyleSpan(Typeface.BOLD),
+                start,
+                start + content.length,
+                Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+
+            offset += 4 // because we removed two `**` pairs
+        }
+
+        return spannable
     }
 
     private fun summarize() {
@@ -67,33 +112,37 @@ class SummarizeFragment : Fragment() {
         generationJob = viewLifecycleOwner.lifecycleScope.launch {
             try {
 
-                    conversation?.generateResponse(input)?.onEach {
-                        when (it) {
-                            is MessageResponse.Chunk -> {
-                                generateTextBuffer.append(it.text)
-                                binding.textOutput.text =generateTextBuffer.toString()
-                                Log.d(TAG, "text chunk: ${it.text}")
-                            }
-                            is MessageResponse.ReasoningChunk -> {
+                conversation?.generateResponse(input)?.onEach {
+                    when (it) {
+                        is MessageResponse.Chunk -> {
+                            generateTextBuffer.append(it.text)
+                            binding.textOutput.text =
+                                parseMarkdownToSpannable(generateTextBuffer.toString())
+                            Log.d(TAG, "text chunk: ${it.text}")
+                        }
+
+                        is MessageResponse.ReasoningChunk -> {
 //                                generatedReasoningBuffer.append(it.reasoning)
 
 //                                Log.d(TAG, "reasoning chunk: ${it.text}")
-                            }
-                            else -> {
-                                // ignore other response
-                            }
+                        }
+
+                        else -> {
+                            // ignore other response
                         }
                     }
-                        ?.onCompletion {
-                            binding.progressBar.visibility= View.GONE
+                }
+                    ?.onCompletion {
+                        binding.progressBar.visibility = View.GONE
 
-                            Log.d(TAG, "Generation done!")
-                            binding.textOutput.text =generateTextBuffer.toString()
-                        }
-                        ?.catch { exception ->
-                            Log.e(TAG, "Error in generation: $exception")
-                        }
-                        ?.collect()
+                        Log.d(TAG, "Generation done!")
+                        binding.textOutput.text =
+                            parseMarkdownToSpannable(generateTextBuffer.toString())
+                    }
+                    ?.catch { exception ->
+                        Log.e(TAG, "Error in generation: $exception")
+                    }
+                    ?.collect()
 
             } catch (e: Exception) {
                 binding.textStatus.text = getString(R.string.generation_error, e.message ?: "error")
